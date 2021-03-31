@@ -1,0 +1,55 @@
+name: Test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '**.rs'
+      - .github/**
+      - Cargo.toml
+
+jobs:
+  build_and_test:
+    if: contains(toJson(github.event), '***NO_CI***') == false && contains(toJson(github.event), 'ci skip') == false && contains(toJson(github.event), 'skip ci') == false
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-18.04, windows-latest]
+        # nightly toolchain is only used for checking fmt compliance
+        toolchain: [stable, nightly]
+
+    steps:
+    - name: Fetch
+      uses: actions/checkout@v2
+    - name: Rustup
+      uses: actions-rs/toolchain@v1
+      with:
+        override: true
+        profile: default
+        toolchain: ${{ matrix.toolchain }}
+    # Check for rustfmt compliance
+    - name: Check rustfmt
+      uses: actions-rs/cargo@v1
+      if: matrix.toolchain == 'nightly'
+      with:
+        command: fmt
+        args: -- --check
+    # Check for Clippy lints
+    - name: Clippy
+      uses: actions-rs/cargo@v1
+      if: matrix.toolchain != 'nightly'
+      with:
+        command: clippy
+        args: --all-targets
+    - name: Build
+      uses: actions-rs/cargo@v1
+      if: matrix.toolchain != 'nightly'
+      with:
+        command: build
+    - name: Test
+      uses: actions-rs/cargo@v1
+      if: matrix.toolchain != 'nightly'
+      with:
+        command: test

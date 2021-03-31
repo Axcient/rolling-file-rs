@@ -1,0 +1,20 @@
+[package]
+name = "rolling-file"
+version = "0.1.0"
+authors = ["Kevin Hoffman <KevinJohnHoffman@gmail.com>"]
+edition = "2018"
+
+description = "A rolling file appender with customizable rolling conditions."
+homepage = "https://github.com/Axcient/rolling-file-rs"
+documentation = "https://docs.rs/rolling-file/"
+repository = "https://github.com/Axcient/rolling-file-rs"
+keywords = ["rolling", "logging", "tracing"]
+categories = ["debugging"]
+readme = "README.md"
+license = "MIT/Apache-2.0"
+
+[dev-dependencies]
+tempfile = "3.0.5"
+
+[dependencies]
+chrono = "0.4"
