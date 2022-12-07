@@ -222,6 +222,11 @@ where
         self.open_writer_if_needed()
     }
 
+    /// Retrieves the rolling condition, possibly to mutete its state dynamically.
+    pub fn condition_mut(&mut self) -> &mut RC {
+        &mut self.condition
+    }
+
     /// Opens a writer for the current file.
     fn open_writer_if_needed(&mut self) -> io::Result<()> {
         if self.writer_opt.is_none() {
