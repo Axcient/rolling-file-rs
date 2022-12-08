@@ -155,6 +155,7 @@ where
     condition: RC,
     base_filename: OsString,
     max_files: usize,
+    buffer_capacity: Option<usize>,
     current_filesize: u64,
     writer_opt: Option<BufWriter<File>>,
 }
@@ -169,10 +170,27 @@ where
     where
         P: AsRef<Path>,
     {
+        Self::_new(path, condition, max_files, None)
+    }
+
+    /// Creates a new rolling file appender with the given condition and write buffer capacity.
+    /// The parent directory of the base path must already exist.
+    pub fn new_with_buffer_capacity<P>(path: P, condition: RC, max_files: usize, buffer_capacity: usize) -> io::Result<RollingFileAppender<RC>>
+    where
+        P: AsRef<Path>,
+    {
+        Self::_new(path, condition, max_files, Some(buffer_capacity))
+    }
+
+    fn _new<P>(path: P, condition: RC, max_files: usize, buffer_capacity: Option<usize>) -> io::Result<RollingFileAppender<RC>>
+    where
+        P: AsRef<Path>,
+    {
         let mut rfa = RollingFileAppender {
             condition,
             base_filename: path.as_ref().as_os_str().to_os_string(),
             max_files,
+            buffer_capacity,
             current_filesize: 0,
             writer_opt: None,
         };
@@ -226,7 +244,12 @@ where
     fn open_writer_if_needed(&mut self) -> io::Result<()> {
         if self.writer_opt.is_none() {
             let p = self.filename_for(0);
-            self.writer_opt = Some(BufWriter::new(OpenOptions::new().append(true).create(true).open(&p)?));
+            let f = OpenOptions::new().append(true).create(true).open(&p)?;
+            self.writer_opt = Some(if let Some(capacity) = self.buffer_capacity {
+                BufWriter::with_capacity(capacity, f)
+            } else {
+                BufWriter::new(f)
+            });
             self.current_filesize = fs::metadata(&p).map_or(0, |m| m.len());
         }
         Ok(())
