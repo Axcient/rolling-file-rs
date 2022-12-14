@@ -222,7 +222,7 @@ where
         self.open_writer_if_needed()
     }
 
-    /// Retrieves the rolling condition, possibly to mutete its state dynamically.
+    /// Retrieves the rolling condition, possibly to mutate its state dynamically.
     pub fn condition_mut(&mut self) -> &mut RC {
         &mut self.condition
     }
