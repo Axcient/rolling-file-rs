@@ -327,19 +327,47 @@ mod t {
     }
 
     impl Context {
-        fn verify_contains(&mut self, needle: &str, n: usize) {
-            self.rolling.flush().unwrap();
-            let p = self.rolling.filename_for(n);
-            let haystack = fs::read_to_string(&p).unwrap();
-            if !haystack.contains(needle) {
-                panic!("file {:?} did not contain expected contents {}", p, needle);
+        #[track_caller]
+        fn verify_contains(&self, needle: &str, n: usize) {
+            let heystack = self.read(n);
+            if !heystack.contains(needle) {
+                panic!("file {:?} did not contain expected contents {}", self.path(n), needle);
             }
+        }
+
+        #[track_caller]
+        fn verify_not_contains(&self, needle: &str, n: usize) {
+            let heystack = self.read(n);
+            if heystack.contains(needle) {
+                panic!("file {:?} DID contain expected contents {}", self.path(n), needle);
+            }
+        }
+
+        fn flush(&mut self) {
+            self.rolling.flush().unwrap();
+        }
+
+        fn read(&self, n: usize) -> String {
+            fs::read_to_string(self.path(n)).unwrap()
+        }
+
+        fn path(&self, n: usize) -> OsString {
+            self.rolling.filename_for(n)
         }
     }
 
-    fn build_context(condition: RollingConditionBasic, max_files: usize) -> Context {
+    fn build_context(condition: RollingConditionBasic, max_files: usize, buffer_capacity: Option<usize>) -> Context {
         let tempdir = tempfile::tempdir().unwrap();
-        let rolling = BasicRollingFileAppender::new(tempdir.path().join("test.log"), condition, max_files).unwrap();
+        let rolling = match buffer_capacity {
+            None => BasicRollingFileAppender::new(tempdir.path().join("test.log"), condition, max_files).unwrap(),
+            Some(capacity) => BasicRollingFileAppender::new_with_buffer_capacity(
+                tempdir.path().join("test.log"),
+                condition,
+                max_files,
+                capacity,
+            )
+            .unwrap(),
+        };
         Context {
             _tempdir: tempdir,
             rolling,
@@ -348,7 +376,7 @@ mod t {
 
     #[test]
     fn frequency_every_day() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 9);
+        let mut c = build_context(RollingConditionBasic::new().daily(), 9, None);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
             .unwrap();
@@ -365,6 +393,7 @@ mod t {
             .write_with_datetime(b"Line 5\n", &Local.ymd(2022, 5, 31).and_hms(1, 4, 0))
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
+        c.flush();
         c.verify_contains("Line 1", 3);
         c.verify_contains("Line 2", 3);
         c.verify_contains("Line 3", 2);
@@ -374,7 +403,7 @@ mod t {
 
     #[test]
     fn frequency_every_day_limited_files() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 2);
+        let mut c = build_context(RollingConditionBasic::new().daily(), 2, None);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
             .unwrap();
@@ -392,6 +421,7 @@ mod t {
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("Line 3", 2);
         c.verify_contains("Line 4", 1);
         c.verify_contains("Line 5", 0);
@@ -399,7 +429,7 @@ mod t {
 
     #[test]
     fn frequency_every_hour() {
-        let mut c = build_context(RollingConditionBasic::new().hourly(), 9);
+        let mut c = build_context(RollingConditionBasic::new().hourly(), 9, None);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
             .unwrap();
@@ -413,6 +443,7 @@ mod t {
             .write_with_datetime(b"Line 4\n", &Local.ymd(2021, 3, 31).and_hms(2, 1, 0))
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("Line 1", 2);
         c.verify_contains("Line 2", 2);
         c.verify_contains("Line 3", 1);
@@ -421,7 +452,11 @@ mod t {
 
     #[test]
     fn frequency_every_minute() {
-        let mut c = build_context(RollingConditionBasic::new().frequency(RollingFrequency::EveryMinute), 9);
+        let mut c = build_context(
+            RollingConditionBasic::new().frequency(RollingFrequency::EveryMinute),
+            9,
+            None,
+        );
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
             .unwrap();
@@ -441,6 +476,7 @@ mod t {
             .write_with_datetime(b"Line 6\n", &Local.ymd(2022, 3, 30).and_hms(2, 3, 0))
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
+        c.flush();
         c.verify_contains("Line 1", 3);
         c.verify_contains("Line 2", 3);
         c.verify_contains("Line 3", 3);
@@ -451,7 +487,7 @@ mod t {
 
     #[test]
     fn max_size() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
         c.rolling
             .write_with_datetime(b"12345", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
             .unwrap();
@@ -468,6 +504,7 @@ mod t {
             .write_with_datetime(b"ZZZ", &Local.ymd(2022, 3, 31).and_hms(1, 2, 3))
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("1234567890", 2);
         c.verify_contains("abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
@@ -475,7 +512,7 @@ mod t {
 
     #[test]
     fn max_size_existing() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
         c.rolling
             .write_with_datetime(b"12345", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
             .unwrap();
@@ -496,6 +533,7 @@ mod t {
             .write_with_datetime(b"ZZZ", &Local.ymd(2022, 3, 31).and_hms(1, 2, 3))
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("1234567890", 2);
         c.verify_contains("abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
@@ -503,7 +541,7 @@ mod t {
 
     #[test]
     fn daily_and_max_size() {
-        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9);
+        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9, None);
         c.rolling
             .write_with_datetime(b"12345", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
             .unwrap();
@@ -520,9 +558,55 @@ mod t {
             .write_with_datetime(b"ZZZ", &Local.ymd(2021, 3, 31).and_hms(4, 4, 4))
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("123456789", 2);
         c.verify_contains("0abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
+    }
+
+    #[test]
+    fn default_buffer_capacity() {
+        let c = build_context(RollingConditionBasic::new().daily(), 9, None);
+        // currently capacity should be 8192; but it may change (ref: https://doc.rust-lang.org/std/io/struct.BufWriter.html#method.new)
+        // so we can't hard code and there's no way to get default capacity other than creating a dummy one...
+        let default_capacity = BufWriter::new(tempfile::tempfile().unwrap()).capacity();
+        if default_capacity != 8192 {
+            eprintln!(
+                "WARN: it seems std's default capacity is changed from 8192 to {}",
+                default_capacity
+            );
+        }
+        assert_eq!(c.rolling.writer_opt.map(|b| b.capacity()), Some(default_capacity));
+    }
+
+    #[test]
+    fn large_buffer_capacity_and_flush() {
+        let mut c = build_context(RollingConditionBasic::new().daily(), 9, Some(100_000));
+        assert_eq!(c.rolling.writer_opt.as_ref().map(|b| b.capacity()), Some(100_000));
+        c.verify_not_contains("12345", 0);
+
+        // implicit flush only after capacity is reached
+        let mut count = 0;
+        for data in std::iter::repeat(b"dummy") {
+            c.rolling
+                .write_with_datetime(data, &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+                .unwrap();
+            count += data.len();
+            if count <= 100_000 {
+                c.verify_not_contains("dummy", 0);
+            } else {
+                break;
+            }
+        }
+        c.verify_contains("dummy", 0);
+
+        // explicit flush
+        c.verify_not_contains("12345", 0);
+        c.rolling
+            .write_with_datetime(b"12345", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .unwrap();
+        c.flush();
+        c.verify_contains("12345", 0);
     }
 }
 // LCOV_EXCL_STOP
