@@ -175,14 +175,24 @@ where
 
     /// Creates a new rolling file appender with the given condition and write buffer capacity.
     /// The parent directory of the base path must already exist.
-    pub fn new_with_buffer_capacity<P>(path: P, condition: RC, max_files: usize, buffer_capacity: usize) -> io::Result<RollingFileAppender<RC>>
+    pub fn new_with_buffer_capacity<P>(
+        path: P,
+        condition: RC,
+        max_files: usize,
+        buffer_capacity: usize,
+    ) -> io::Result<RollingFileAppender<RC>>
     where
         P: AsRef<Path>,
     {
         Self::_new(path, condition, max_files, Some(buffer_capacity))
     }
 
-    fn _new<P>(path: P, condition: RC, max_files: usize, buffer_capacity: Option<usize>) -> io::Result<RollingFileAppender<RC>>
+    fn _new<P>(
+        path: P,
+        condition: RC,
+        max_files: usize,
+        buffer_capacity: Option<usize>,
+    ) -> io::Result<RollingFileAppender<RC>>
     where
         P: AsRef<Path>,
     {
