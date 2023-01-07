@@ -227,7 +227,7 @@ where
         for i in (0..self.max_files.max(1)).rev() {
             let rotate_from = self.filename_for(i);
             let rotate_to = self.filename_for(i + 1);
-            if let Err(e) = fs::rename(&rotate_from, &rotate_to).or_else(|e| match e.kind() {
+            if let Err(e) = fs::rename(rotate_from, rotate_to).or_else(|e| match e.kind() {
                 io::ErrorKind::NotFound => Ok(()),
                 _ => Err(e),
             }) {
@@ -267,7 +267,7 @@ where
 
     /// Writes data using the given datetime to calculate the rolling condition
     pub fn write_with_datetime(&mut self, buf: &[u8], now: &DateTime<Local>) -> io::Result<usize> {
-        if self.condition.should_rollover(&now, self.current_filesize) {
+        if self.condition.should_rollover(now, self.current_filesize) {
             if let Err(e) = self.rollover() {
                 // If we can't rollover, just try to continue writing anyway
                 // (better than missing data).
@@ -364,7 +364,7 @@ mod t {
         c.rolling
             .write_with_datetime(b"Line 5\n", &Local.ymd(2022, 5, 31).and_hms(1, 4, 0))
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
         c.verify_contains("Line 1", 3);
         c.verify_contains("Line 2", 3);
         c.verify_contains("Line 3", 2);
@@ -390,8 +390,8 @@ mod t {
         c.rolling
             .write_with_datetime(b"Line 5\n", &Local.ymd(2022, 5, 31).and_hms(1, 4, 0))
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists(), false);
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.verify_contains("Line 3", 2);
         c.verify_contains("Line 4", 1);
         c.verify_contains("Line 5", 0);
@@ -412,7 +412,7 @@ mod t {
         c.rolling
             .write_with_datetime(b"Line 4\n", &Local.ymd(2021, 3, 31).and_hms(2, 1, 0))
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.verify_contains("Line 1", 2);
         c.verify_contains("Line 2", 2);
         c.verify_contains("Line 3", 1);
@@ -440,7 +440,7 @@ mod t {
         c.rolling
             .write_with_datetime(b"Line 6\n", &Local.ymd(2022, 3, 30).and_hms(2, 3, 0))
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
         c.verify_contains("Line 1", 3);
         c.verify_contains("Line 2", 3);
         c.verify_contains("Line 3", 3);
@@ -467,7 +467,7 @@ mod t {
         c.rolling
             .write_with_datetime(b"ZZZ", &Local.ymd(2022, 3, 31).and_hms(1, 2, 3))
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.verify_contains("1234567890", 2);
         c.verify_contains("abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
@@ -495,7 +495,7 @@ mod t {
         c.rolling
             .write_with_datetime(b"ZZZ", &Local.ymd(2022, 3, 31).and_hms(1, 2, 3))
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.verify_contains("1234567890", 2);
         c.verify_contains("abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
@@ -519,7 +519,7 @@ mod t {
         c.rolling
             .write_with_datetime(b"ZZZ", &Local.ymd(2021, 3, 31).and_hms(4, 4, 4))
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.verify_contains("123456789", 2);
         c.verify_contains("0abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
