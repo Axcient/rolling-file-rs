@@ -586,13 +586,11 @@ mod t {
         c.verify_not_contains("12345", 0);
 
         // implicit flush only after capacity is reached
-        let mut count = 0;
         for data in std::iter::repeat(b"dummy") {
             c.rolling
                 .write_with_datetime(data, &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
                 .unwrap();
-            count += data.len();
-            if count <= 100_000 {
+            if c.rolling.current_filesize <= 100_000 {
                 c.verify_not_contains("dummy", 0);
             } else {
                 break;
