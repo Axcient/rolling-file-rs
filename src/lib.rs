@@ -54,13 +54,15 @@ impl RollingFrequency {
     /// different files.
     pub fn equivalent_datetime(&self, dt: &DateTime<Local>) -> DateTime<Local> {
         match self {
-            RollingFrequency::EveryDay => Local.ymd(dt.year(), dt.month(), dt.day()).and_hms(0, 0, 0),
-            RollingFrequency::EveryHour => Local.ymd(dt.year(), dt.month(), dt.day()).and_hms(dt.hour(), 0, 0),
-            RollingFrequency::EveryMinute => {
-                Local
-                    .ymd(dt.year(), dt.month(), dt.day())
-                    .and_hms(dt.hour(), dt.minute(), 0)
-            },
+            RollingFrequency::EveryDay => Local
+                .with_ymd_and_hms(dt.year(), dt.month(), dt.day(), 0, 0, 0)
+                .unwrap(),
+            RollingFrequency::EveryHour => Local
+                .with_ymd_and_hms(dt.year(), dt.month(), dt.day(), dt.hour(), 0, 0)
+                .unwrap(),
+            RollingFrequency::EveryMinute => Local
+                .with_ymd_and_hms(dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), 0)
+                .unwrap(),
         }
     }
 }
@@ -155,6 +157,7 @@ where
     condition: RC,
     base_filename: OsString,
     max_files: usize,
+    buffer_capacity: Option<usize>,
     current_filesize: u64,
     writer_opt: Option<BufWriter<File>>,
 }
@@ -169,10 +172,37 @@ where
     where
         P: AsRef<Path>,
     {
+        Self::_new(path, condition, max_files, None)
+    }
+
+    /// Creates a new rolling file appender with the given condition and write buffer capacity.
+    /// The parent directory of the base path must already exist.
+    pub fn new_with_buffer_capacity<P>(
+        path: P,
+        condition: RC,
+        max_files: usize,
+        buffer_capacity: usize,
+    ) -> io::Result<RollingFileAppender<RC>>
+    where
+        P: AsRef<Path>,
+    {
+        Self::_new(path, condition, max_files, Some(buffer_capacity))
+    }
+
+    fn _new<P>(
+        path: P,
+        condition: RC,
+        max_files: usize,
+        buffer_capacity: Option<usize>,
+    ) -> io::Result<RollingFileAppender<RC>>
+    where
+        P: AsRef<Path>,
+    {
         let mut rfa = RollingFileAppender {
             condition,
             base_filename: path.as_ref().as_os_str().to_os_string(),
             max_files,
+            buffer_capacity,
             current_filesize: 0,
             writer_opt: None,
         };
@@ -199,7 +229,7 @@ where
         for i in (0..self.max_files.max(1)).rev() {
             let rotate_from = self.filename_for(i);
             let rotate_to = self.filename_for(i + 1);
-            if let Err(e) = fs::rename(&rotate_from, &rotate_to).or_else(|e| match e.kind() {
+            if let Err(e) = fs::rename(rotate_from, rotate_to).or_else(|e| match e.kind() {
                 io::ErrorKind::NotFound => Ok(()),
                 _ => Err(e),
             }) {
@@ -226,7 +256,12 @@ where
     fn open_writer_if_needed(&mut self) -> io::Result<()> {
         if self.writer_opt.is_none() {
             let p = self.filename_for(0);
-            self.writer_opt = Some(BufWriter::new(OpenOptions::new().append(true).create(true).open(&p)?));
+            let f = OpenOptions::new().append(true).create(true).open(&p)?;
+            self.writer_opt = Some(if let Some(capacity) = self.buffer_capacity {
+                BufWriter::with_capacity(capacity, f)
+            } else {
+                BufWriter::new(f)
+            });
             self.current_filesize = fs::metadata(&p).map_or(0, |m| m.len());
         }
         Ok(())
@@ -234,7 +269,7 @@ where
 
     /// Writes data using the given datetime to calculate the rolling condition
     pub fn write_with_datetime(&mut self, buf: &[u8], now: &DateTime<Local>) -> io::Result<usize> {
-        if self.condition.should_rollover(&now, self.current_filesize) {
+        if self.condition.should_rollover(now, self.current_filesize) {
             if let Err(e) = self.rollover() {
                 // If we can't rollover, just try to continue writing anyway
                 // (better than missing data).
@@ -294,19 +329,47 @@ mod t {
     }
 
     impl Context {
-        fn verify_contains(&mut self, needle: &str, n: usize) {
-            self.rolling.flush().unwrap();
-            let p = self.rolling.filename_for(n);
-            let haystack = fs::read_to_string(&p).unwrap();
-            if !haystack.contains(needle) {
-                panic!("file {:?} did not contain expected contents {}", p, needle);
+        #[track_caller]
+        fn verify_contains(&self, needle: &str, n: usize) {
+            let heystack = self.read(n);
+            if !heystack.contains(needle) {
+                panic!("file {:?} did not contain expected contents {}", self.path(n), needle);
             }
+        }
+
+        #[track_caller]
+        fn verify_not_contains(&self, needle: &str, n: usize) {
+            let heystack = self.read(n);
+            if heystack.contains(needle) {
+                panic!("file {:?} DID contain expected contents {}", self.path(n), needle);
+            }
+        }
+
+        fn flush(&mut self) {
+            self.rolling.flush().unwrap();
+        }
+
+        fn read(&self, n: usize) -> String {
+            fs::read_to_string(self.path(n)).unwrap()
+        }
+
+        fn path(&self, n: usize) -> OsString {
+            self.rolling.filename_for(n)
         }
     }
 
-    fn build_context(condition: RollingConditionBasic, max_files: usize) -> Context {
+    fn build_context(condition: RollingConditionBasic, max_files: usize, buffer_capacity: Option<usize>) -> Context {
         let tempdir = tempfile::tempdir().unwrap();
-        let rolling = BasicRollingFileAppender::new(tempdir.path().join("test.log"), condition, max_files).unwrap();
+        let rolling = match buffer_capacity {
+            None => BasicRollingFileAppender::new(tempdir.path().join("test.log"), condition, max_files).unwrap(),
+            Some(capacity) => BasicRollingFileAppender::new_with_buffer_capacity(
+                tempdir.path().join("test.log"),
+                condition,
+                max_files,
+                capacity,
+            )
+            .unwrap(),
+        };
         Context {
             _tempdir: tempdir,
             rolling,
@@ -315,23 +378,24 @@ mod t {
 
     #[test]
     fn frequency_every_day() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 9);
+        let mut c = build_context(RollingConditionBasic::new().daily(), 9, None);
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.ymd(2021, 3, 30).and_hms(1, 3, 0))
+            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.ymd(2021, 3, 31).and_hms(1, 4, 0))
+            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.ymd(2021, 5, 31).and_hms(1, 4, 0))
+            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 5\n", &Local.ymd(2022, 5, 31).and_hms(1, 4, 0))
+            .write_with_datetime(b"Line 5\n", &Local.with_ymd_and_hms(2022, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
+        c.flush();
         c.verify_contains("Line 1", 3);
         c.verify_contains("Line 2", 3);
         c.verify_contains("Line 3", 2);
@@ -341,24 +405,25 @@ mod t {
 
     #[test]
     fn frequency_every_day_limited_files() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 2);
+        let mut c = build_context(RollingConditionBasic::new().daily(), 2, None);
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.ymd(2021, 3, 30).and_hms(1, 3, 0))
+            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.ymd(2021, 3, 31).and_hms(1, 4, 0))
+            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.ymd(2021, 5, 31).and_hms(1, 4, 0))
+            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 5\n", &Local.ymd(2022, 5, 31).and_hms(1, 4, 0))
+            .write_with_datetime(b"Line 5\n", &Local.with_ymd_and_hms(2022, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists(), false);
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("Line 3", 2);
         c.verify_contains("Line 4", 1);
         c.verify_contains("Line 5", 0);
@@ -366,20 +431,21 @@ mod t {
 
     #[test]
     fn frequency_every_hour() {
-        let mut c = build_context(RollingConditionBasic::new().hourly(), 9);
+        let mut c = build_context(RollingConditionBasic::new().hourly(), 9, None);
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.ymd(2021, 3, 30).and_hms(1, 3, 2))
+            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 2).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.ymd(2021, 3, 30).and_hms(2, 1, 0))
+            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 30, 2, 1, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.ymd(2021, 3, 31).and_hms(2, 1, 0))
+            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 3, 31, 2, 1, 0).unwrap())
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("Line 1", 2);
         c.verify_contains("Line 2", 2);
         c.verify_contains("Line 3", 1);
@@ -388,26 +454,31 @@ mod t {
 
     #[test]
     fn frequency_every_minute() {
-        let mut c = build_context(RollingConditionBasic::new().frequency(RollingFrequency::EveryMinute), 9);
+        let mut c = build_context(
+            RollingConditionBasic::new().frequency(RollingFrequency::EveryMinute),
+            9,
+            None,
+        );
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.ymd(2021, 3, 30).and_hms(1, 2, 4))
+            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 4).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.ymd(2021, 3, 30).and_hms(1, 3, 0))
+            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 5\n", &Local.ymd(2021, 3, 30).and_hms(2, 3, 0))
+            .write_with_datetime(b"Line 5\n", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 6\n", &Local.ymd(2022, 3, 30).and_hms(2, 3, 0))
+            .write_with_datetime(b"Line 6\n", &Local.with_ymd_and_hms(2022, 3, 30, 2, 3, 0).unwrap())
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
+        c.flush();
         c.verify_contains("Line 1", 3);
         c.verify_contains("Line 2", 3);
         c.verify_contains("Line 3", 3);
@@ -418,23 +489,27 @@ mod t {
 
     #[test]
     fn max_size() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
         c.rolling
-            .write_with_datetime(b"12345", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"6789", &Local.ymd(2021, 3, 30).and_hms(1, 3, 3))
+            .write_with_datetime(b"6789", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"0", &Local.ymd(2021, 3, 30).and_hms(2, 3, 3))
+            .write_with_datetime(b"0", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"abcdefghijklmn", &Local.ymd(2021, 3, 31).and_hms(2, 3, 3))
+            .write_with_datetime(
+                b"abcdefghijklmn",
+                &Local.with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap(),
+            )
             .unwrap();
         c.rolling
-            .write_with_datetime(b"ZZZ", &Local.ymd(2022, 3, 31).and_hms(1, 2, 3))
+            .write_with_datetime(b"ZZZ", &Local.with_ymd_and_hms(2022, 3, 31, 1, 2, 3).unwrap())
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("1234567890", 2);
         c.verify_contains("abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
@@ -442,27 +517,31 @@ mod t {
 
     #[test]
     fn max_size_existing() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
         c.rolling
-            .write_with_datetime(b"12345", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         // close the file and make sure that it can re-open it, and that it
         // resets the file size properly.
         c.rolling.writer_opt.take();
         c.rolling.current_filesize = 0;
         c.rolling
-            .write_with_datetime(b"6789", &Local.ymd(2021, 3, 30).and_hms(1, 3, 3))
+            .write_with_datetime(b"6789", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"0", &Local.ymd(2021, 3, 30).and_hms(2, 3, 3))
+            .write_with_datetime(b"0", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"abcdefghijklmn", &Local.ymd(2021, 3, 31).and_hms(2, 3, 3))
+            .write_with_datetime(
+                b"abcdefghijklmn",
+                &Local.with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap(),
+            )
             .unwrap();
         c.rolling
-            .write_with_datetime(b"ZZZ", &Local.ymd(2022, 3, 31).and_hms(1, 2, 3))
+            .write_with_datetime(b"ZZZ", &Local.with_ymd_and_hms(2022, 3, 31, 1, 2, 3).unwrap())
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("1234567890", 2);
         c.verify_contains("abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
@@ -470,26 +549,73 @@ mod t {
 
     #[test]
     fn daily_and_max_size() {
-        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9);
+        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9, None);
         c.rolling
-            .write_with_datetime(b"12345", &Local.ymd(2021, 3, 30).and_hms(1, 2, 3))
+            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"6789", &Local.ymd(2021, 3, 30).and_hms(2, 3, 3))
+            .write_with_datetime(b"6789", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"0", &Local.ymd(2021, 3, 31).and_hms(2, 3, 3))
+            .write_with_datetime(b"0", &Local.with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"abcdefghijklmn", &Local.ymd(2021, 3, 31).and_hms(3, 3, 3))
+            .write_with_datetime(
+                b"abcdefghijklmn",
+                &Local.with_ymd_and_hms(2021, 3, 31, 3, 3, 3).unwrap(),
+            )
             .unwrap();
         c.rolling
-            .write_with_datetime(b"ZZZ", &Local.ymd(2021, 3, 31).and_hms(4, 4, 4))
+            .write_with_datetime(b"ZZZ", &Local.with_ymd_and_hms(2021, 3, 31, 4, 4, 4).unwrap())
             .unwrap();
-        assert_eq!(AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists(), false);
+        assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
+        c.flush();
         c.verify_contains("123456789", 2);
         c.verify_contains("0abcdefghijklmn", 1);
         c.verify_contains("ZZZ", 0);
+    }
+
+    #[test]
+    fn default_buffer_capacity() {
+        let c = build_context(RollingConditionBasic::new().daily(), 9, None);
+        // currently capacity should be 8192; but it may change (ref: https://doc.rust-lang.org/std/io/struct.BufWriter.html#method.new)
+        // so we can't hard code and there's no way to get default capacity other than creating a dummy one...
+        let default_capacity = BufWriter::new(tempfile::tempfile().unwrap()).capacity();
+        if default_capacity != 8192 {
+            eprintln!(
+                "WARN: it seems std's default capacity is changed from 8192 to {}",
+                default_capacity
+            );
+        }
+        assert_eq!(c.rolling.writer_opt.map(|b| b.capacity()), Some(default_capacity));
+    }
+
+    #[test]
+    fn large_buffer_capacity_and_flush() {
+        let mut c = build_context(RollingConditionBasic::new().daily(), 9, Some(100_000));
+        assert_eq!(c.rolling.writer_opt.as_ref().map(|b| b.capacity()), Some(100_000));
+        c.verify_not_contains("12345", 0);
+
+        // implicit flush only after capacity is reached
+        loop {
+            c.rolling
+                .write_with_datetime(b"dummy", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+                .unwrap();
+            if c.rolling.current_filesize <= 100_000 {
+                c.verify_not_contains("dummy", 0);
+            } else {
+                break;
+            }
+        }
+        c.verify_contains("dummy", 0);
+
+        // explicit flush
+        c.verify_not_contains("12345", 0);
+        c.rolling
+            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .unwrap();
+        c.flush();
+        c.verify_contains("12345", 0);
     }
 }
 // LCOV_EXCL_STOP
