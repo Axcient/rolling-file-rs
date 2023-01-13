@@ -252,6 +252,16 @@ where
         self.open_writer_if_needed()
     }
 
+    /// Returns a reference to the rolling condition
+    pub fn condition_ref(&self) -> &RC {
+        &self.condition
+    }
+
+    /// Returns a mutable reference to the rolling condition, possibly to mutate its state dynamically.
+    pub fn condition_mut(&mut self) -> &mut RC {
+        &mut self.condition
+    }
+
     /// Opens a writer for the current file.
     fn open_writer_if_needed(&mut self) -> io::Result<()> {
         if self.writer_opt.is_none() {
