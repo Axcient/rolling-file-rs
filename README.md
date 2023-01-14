@@ -43,3 +43,7 @@ cargo test
 ## License
 
 Dual-licensed under the terms of either the MIT license or the Apache 2.0 license.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md)
