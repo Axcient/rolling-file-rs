@@ -1,6 +1,6 @@
 [package]
 name = "rolling-file"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Kevin Hoffman <KevinJohnHoffman@gmail.com>"]
 edition = "2018"
 
@@ -15,6 +15,7 @@ license = "MIT/Apache-2.0"
 
 [dev-dependencies]
 tempfile = "3.0.5"
+time = { version = "0.3.17", features = ["local-offset", "macros"] }
 
 [dependencies]
-chrono = "0.4.23"
+time = { version = "0.3.17", features = ["local-offset"] }

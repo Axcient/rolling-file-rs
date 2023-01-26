@@ -24,7 +24,6 @@
 //! ```
 #![deny(warnings)]
 
-use chrono::prelude::*;
 use std::{
     convert::TryFrom,
     ffi::OsString,
@@ -35,10 +34,12 @@ use std::{
     path::Path,
 };
 
+use time::{OffsetDateTime, Time};
+
 /// Determines when a file should be "rolled over".
 pub trait RollingCondition {
     /// Determine and return whether or not the file should be rolled over.
-    fn should_rollover(&mut self, now: &DateTime<Local>, current_filesize: u64) -> bool;
+    fn should_rollover(&mut self, now: OffsetDateTime, current_filesize: u64) -> bool;
 }
 
 /// Determines how often a file should be rolled over
@@ -52,17 +53,11 @@ pub enum RollingFrequency {
 impl RollingFrequency {
     /// Calculates a datetime that will be different if data should be in
     /// different files.
-    pub fn equivalent_datetime(&self, dt: &DateTime<Local>) -> DateTime<Local> {
+    pub fn equivalent_datetime(&self, dt: OffsetDateTime) -> OffsetDateTime {
         match self {
-            RollingFrequency::EveryDay => Local
-                .with_ymd_and_hms(dt.year(), dt.month(), dt.day(), 0, 0, 0)
-                .unwrap(),
-            RollingFrequency::EveryHour => Local
-                .with_ymd_and_hms(dt.year(), dt.month(), dt.day(), dt.hour(), 0, 0)
-                .unwrap(),
-            RollingFrequency::EveryMinute => Local
-                .with_ymd_and_hms(dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), 0)
-                .unwrap(),
+            RollingFrequency::EveryDay => dt.replace_time(Time::MIDNIGHT),
+            RollingFrequency::EveryHour => dt.replace_time(Time::from_hms(dt.hour(), 0, 0).unwrap()),
+            RollingFrequency::EveryMinute => dt.replace_time(Time::from_hms(dt.hour(), dt.minute(), 0).unwrap()),
         }
     }
 }
@@ -79,7 +74,7 @@ impl RollingFrequency {
 /// ```
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct RollingConditionBasic {
-    last_write_opt: Option<DateTime<Local>>,
+    last_write_opt: Option<OffsetDateTime>,
     frequency_opt: Option<RollingFrequency>,
     max_size_opt: Option<u64>,
 }
@@ -126,10 +121,10 @@ impl Default for RollingConditionBasic {
 }
 
 impl RollingCondition for RollingConditionBasic {
-    fn should_rollover(&mut self, now: &DateTime<Local>, current_filesize: u64) -> bool {
+    fn should_rollover(&mut self, now: OffsetDateTime, current_filesize: u64) -> bool {
         let mut rollover = false;
         if let Some(frequency) = self.frequency_opt.as_ref() {
-            if let Some(last_write) = self.last_write_opt.as_ref() {
+            if let Some(last_write) = self.last_write_opt {
                 if frequency.equivalent_datetime(now) != frequency.equivalent_datetime(last_write) {
                     rollover = true;
                 }
@@ -140,7 +135,7 @@ impl RollingCondition for RollingConditionBasic {
                 rollover = true;
             }
         }
-        self.last_write_opt = Some(*now);
+        self.last_write_opt = Some(now);
         rollover
     }
 }
@@ -278,7 +273,7 @@ where
     }
 
     /// Writes data using the given datetime to calculate the rolling condition
-    pub fn write_with_datetime(&mut self, buf: &[u8], now: &DateTime<Local>) -> io::Result<usize> {
+    pub fn write_with_datetime(&mut self, buf: &[u8], now: OffsetDateTime) -> io::Result<usize> {
         if self.condition.should_rollover(now, self.current_filesize) {
             if let Err(e) = self.rollover() {
                 // If we can't rollover, just try to continue writing anyway
@@ -313,8 +308,8 @@ where
     RC: RollingCondition,
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let now = Local::now();
-        self.write_with_datetime(buf, &now)
+        let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
+        self.write_with_datetime(buf, now)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -331,6 +326,10 @@ pub type BasicRollingFileAppender = RollingFileAppender<RollingConditionBasic>;
 // LCOV_EXCL_START
 #[cfg(test)]
 mod t {
+    use std::convert::TryInto;
+
+    use time::{error::ComponentRange, macros::offset, Date, PrimitiveDateTime, Time};
+
     use super::*;
 
     struct Context {
@@ -390,19 +389,19 @@ mod t {
     fn frequency_every_day() {
         let mut c = build_context(RollingConditionBasic::new().daily(), 9, None);
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"Line 1\n", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
+            .write_with_datetime(b"Line 2\n", with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 31, 1, 4, 0).unwrap())
+            .write_with_datetime(b"Line 3\n", with_ymd_and_hms(2021, 3, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 5, 31, 1, 4, 0).unwrap())
+            .write_with_datetime(b"Line 4\n", with_ymd_and_hms(2021, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 5\n", &Local.with_ymd_and_hms(2022, 5, 31, 1, 4, 0).unwrap())
+            .write_with_datetime(b"Line 5\n", with_ymd_and_hms(2022, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
         c.flush();
@@ -417,19 +416,19 @@ mod t {
     fn frequency_every_day_limited_files() {
         let mut c = build_context(RollingConditionBasic::new().daily(), 2, None);
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"Line 1\n", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
+            .write_with_datetime(b"Line 2\n", with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 31, 1, 4, 0).unwrap())
+            .write_with_datetime(b"Line 3\n", with_ymd_and_hms(2021, 3, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 5, 31, 1, 4, 0).unwrap())
+            .write_with_datetime(b"Line 4\n", with_ymd_and_hms(2021, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 5\n", &Local.with_ymd_and_hms(2022, 5, 31, 1, 4, 0).unwrap())
+            .write_with_datetime(b"Line 5\n", with_ymd_and_hms(2022, 5, 31, 1, 4, 0).unwrap())
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
@@ -443,16 +442,16 @@ mod t {
     fn frequency_every_hour() {
         let mut c = build_context(RollingConditionBasic::new().hourly(), 9, None);
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"Line 1\n", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 2).unwrap())
+            .write_with_datetime(b"Line 2\n", with_ymd_and_hms(2021, 3, 30, 1, 3, 2).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 30, 2, 1, 0).unwrap())
+            .write_with_datetime(b"Line 3\n", with_ymd_and_hms(2021, 3, 30, 2, 1, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 3, 31, 2, 1, 0).unwrap())
+            .write_with_datetime(b"Line 4\n", with_ymd_and_hms(2021, 3, 31, 2, 1, 0).unwrap())
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.flush();
@@ -470,22 +469,22 @@ mod t {
             None,
         );
         c.rolling
-            .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"Line 1\n", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 2\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"Line 2\n", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 3\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 4).unwrap())
+            .write_with_datetime(b"Line 3\n", with_ymd_and_hms(2021, 3, 30, 1, 2, 4).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 4\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
+            .write_with_datetime(b"Line 4\n", with_ymd_and_hms(2021, 3, 30, 1, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 5\n", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 0).unwrap())
+            .write_with_datetime(b"Line 5\n", with_ymd_and_hms(2021, 3, 30, 2, 3, 0).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"Line 6\n", &Local.with_ymd_and_hms(2022, 3, 30, 2, 3, 0).unwrap())
+            .write_with_datetime(b"Line 6\n", with_ymd_and_hms(2022, 3, 30, 2, 3, 0).unwrap())
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(4)).exists());
         c.flush();
@@ -501,22 +500,19 @@ mod t {
     fn max_size() {
         let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
         c.rolling
-            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"12345", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"6789", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 3).unwrap())
+            .write_with_datetime(b"6789", with_ymd_and_hms(2021, 3, 30, 1, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"0", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
+            .write_with_datetime(b"0", with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(
-                b"abcdefghijklmn",
-                &Local.with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap(),
-            )
+            .write_with_datetime(b"abcdefghijklmn", with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"ZZZ", &Local.with_ymd_and_hms(2022, 3, 31, 1, 2, 3).unwrap())
+            .write_with_datetime(b"ZZZ", with_ymd_and_hms(2022, 3, 31, 1, 2, 3).unwrap())
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.flush();
@@ -529,26 +525,23 @@ mod t {
     fn max_size_existing() {
         let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
         c.rolling
-            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"12345", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         // close the file and make sure that it can re-open it, and that it
         // resets the file size properly.
         c.rolling.writer_opt.take();
         c.rolling.current_filesize = 0;
         c.rolling
-            .write_with_datetime(b"6789", &Local.with_ymd_and_hms(2021, 3, 30, 1, 3, 3).unwrap())
+            .write_with_datetime(b"6789", with_ymd_and_hms(2021, 3, 30, 1, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"0", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
+            .write_with_datetime(b"0", with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(
-                b"abcdefghijklmn",
-                &Local.with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap(),
-            )
+            .write_with_datetime(b"abcdefghijklmn", with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"ZZZ", &Local.with_ymd_and_hms(2022, 3, 31, 1, 2, 3).unwrap())
+            .write_with_datetime(b"ZZZ", with_ymd_and_hms(2022, 3, 31, 1, 2, 3).unwrap())
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.flush();
@@ -561,22 +554,19 @@ mod t {
     fn daily_and_max_size() {
         let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9, None);
         c.rolling
-            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"12345", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"6789", &Local.with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
+            .write_with_datetime(b"6789", with_ymd_and_hms(2021, 3, 30, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"0", &Local.with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap())
+            .write_with_datetime(b"0", with_ymd_and_hms(2021, 3, 31, 2, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(
-                b"abcdefghijklmn",
-                &Local.with_ymd_and_hms(2021, 3, 31, 3, 3, 3).unwrap(),
-            )
+            .write_with_datetime(b"abcdefghijklmn", with_ymd_and_hms(2021, 3, 31, 3, 3, 3).unwrap())
             .unwrap();
         c.rolling
-            .write_with_datetime(b"ZZZ", &Local.with_ymd_and_hms(2021, 3, 31, 4, 4, 4).unwrap())
+            .write_with_datetime(b"ZZZ", with_ymd_and_hms(2021, 3, 31, 4, 4, 4).unwrap())
             .unwrap();
         assert!(!AsRef::<Path>::as_ref(&c.rolling.filename_for(3)).exists());
         c.flush();
@@ -609,7 +599,7 @@ mod t {
         // implicit flush only after capacity is reached
         loop {
             c.rolling
-                .write_with_datetime(b"dummy", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+                .write_with_datetime(b"dummy", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
                 .unwrap();
             if c.rolling.current_filesize <= 100_000 {
                 c.verify_not_contains("dummy", 0);
@@ -622,10 +612,25 @@ mod t {
         // explicit flush
         c.verify_not_contains("12345", 0);
         c.rolling
-            .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
+            .write_with_datetime(b"12345", with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
         c.flush();
         c.verify_contains("12345", 0);
+    }
+
+    fn with_ymd_and_hms(
+        year: i32,
+        month: u8,
+        day: u8,
+        hour: u8,
+        min: u8,
+        sec: u8,
+    ) -> Result<OffsetDateTime, ComponentRange> {
+        Ok(PrimitiveDateTime::new(
+            Date::from_calendar_date(year, month.try_into().unwrap(), day)?,
+            Time::from_hms(hour, min, sec)?,
+        )
+        .assume_offset(offset!(UTC)))
     }
 }
 // LCOV_EXCL_STOP
