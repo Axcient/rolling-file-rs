@@ -67,6 +67,23 @@ impl RollingFrequency {
     }
 }
 
+/// Implements a rolling condition to never rolling.
+pub struct NoRollingCondition {}
+
+impl RollingCondition for NoRollingCondition {
+    /// Always return false because it do not have to roll.
+    fn should_rollover(&mut self, _now: &DateTime<Local>, _current_filesize: u64) -> bool {
+        false
+    }
+}
+
+impl Default for NoRollingCondition {
+    /// Constructs a new NoRollingCondition.
+    fn default() -> Self {
+        Self {}
+    }
+}
+
 /// Implements a rolling condition based on a certain frequency
 /// and/or a size limit. The default condition is to rotate daily.
 ///
@@ -328,17 +345,26 @@ where
 /// A rolling file appender with a rolling condition based on date/time or size.
 pub type BasicRollingFileAppender = RollingFileAppender<RollingConditionBasic>;
 
+/// A non-rolling file appender.
+pub type FileAppender = RollingFileAppender<NoRollingCondition>;
+
 // LCOV_EXCL_START
 #[cfg(test)]
 mod t {
     use super::*;
 
-    struct Context {
+    struct Context<RC>
+    where
+        RC: RollingCondition,
+    {
         _tempdir: tempfile::TempDir,
-        rolling: BasicRollingFileAppender,
+        rolling: RollingFileAppender<RC>,
     }
 
-    impl Context {
+    impl<RC> Context<RC>
+    where
+        RC: RollingCondition,
+    {
         #[track_caller]
         fn verify_contains(&self, needle: &str, n: usize) {
             let heystack = self.read(n);
@@ -368,11 +394,15 @@ mod t {
         }
     }
 
-    fn build_context(condition: RollingConditionBasic, max_files: usize, buffer_capacity: Option<usize>) -> Context {
+    fn build_context<RC: RollingCondition>(
+        condition: RC,
+        max_files: usize,
+        buffer_capacity: Option<usize>,
+    ) -> Context<RC> {
         let tempdir = tempfile::tempdir().unwrap();
         let rolling = match buffer_capacity {
-            None => BasicRollingFileAppender::new(tempdir.path().join("test.log"), condition, max_files).unwrap(),
-            Some(capacity) => BasicRollingFileAppender::new_with_buffer_capacity(
+            None => RollingFileAppender::<RC>::new(tempdir.path().join("test.log"), condition, max_files).unwrap(),
+            Some(capacity) => RollingFileAppender::<RC>::new_with_buffer_capacity(
                 tempdir.path().join("test.log"),
                 condition,
                 max_files,
@@ -626,6 +656,22 @@ mod t {
             .unwrap();
         c.flush();
         c.verify_contains("12345", 0);
+    }
+
+    #[test]
+    fn file_appender() {
+        let mut c = build_context(NoRollingCondition::default(), 1, Some(100));
+        assert_eq!(c.rolling.writer_opt.as_ref().map(|b| b.capacity()), Some(100));
+
+        c.rolling.write_all(b"hello").unwrap();
+        c.verify_not_contains("hello", 0);
+        c.flush();
+        c.verify_contains("hello", 0);
+
+        c.rolling.write_all(b"world").unwrap();
+        c.verify_not_contains("world", 0);
+        c.flush();
+        c.verify_contains("world", 0);
     }
 }
 // LCOV_EXCL_STOP
