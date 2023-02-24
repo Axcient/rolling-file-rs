@@ -17,8 +17,7 @@
 //! # use rolling_file::*;
 //! let file_appender = BasicRollingFileAppender::new(
 //!     "/var/log/myprogram",
-//!     RollingConditionBasic::new().daily(),
-//!     9
+//!     RollingConditionBasic::new().daily().max_files(9),
 //! ).unwrap();
 //! # }
 //! ```
@@ -37,8 +36,11 @@ use std::{
 
 /// Determines when a file should be "rolled over".
 pub trait RollingCondition {
-    /// Determine and return whether or not the file should be rolled over.
+    /// Determine and return whether or not the file shoud be rolled over.
     fn should_rollover(&mut self, now: &DateTime<Local>, current_filesize: u64) -> bool;
+
+    /// Determines the maximum number of files.
+    fn max_files(&self) -> usize;
 }
 
 /// Determines how often a file should be rolled over
@@ -75,6 +77,10 @@ impl RollingCondition for NoRollingCondition {
     fn should_rollover(&mut self, _now: &DateTime<Local>, _current_filesize: u64) -> bool {
         false
     }
+
+    fn max_files(&self) -> usize {
+        1
+    }
 }
 
 impl Default for NoRollingCondition {
@@ -99,39 +105,47 @@ pub struct RollingConditionBasic {
     last_write_opt: Option<DateTime<Local>>,
     frequency_opt: Option<RollingFrequency>,
     max_size_opt: Option<u64>,
+    max_files_opt: Option<usize>,
 }
 
 impl RollingConditionBasic {
     /// Constructs a new struct that does not yet have any condition set.
-    pub fn new() -> RollingConditionBasic {
-        RollingConditionBasic {
+    pub fn new() -> Self {
+        Self {
             last_write_opt: None,
             frequency_opt: None,
             max_size_opt: None,
+            max_files_opt: None,
         }
     }
 
     /// Sets a condition to rollover on the given frequency
-    pub fn frequency(mut self, x: RollingFrequency) -> RollingConditionBasic {
+    pub fn frequency(mut self, x: RollingFrequency) -> Self {
         self.frequency_opt = Some(x);
         self
     }
 
     /// Sets a condition to rollover when the date changes
-    pub fn daily(mut self) -> RollingConditionBasic {
+    pub fn daily(mut self) -> Self {
         self.frequency_opt = Some(RollingFrequency::EveryDay);
         self
     }
 
     /// Sets a condition to rollover when the date or hour changes
-    pub fn hourly(mut self) -> RollingConditionBasic {
+    pub fn hourly(mut self) -> Self {
         self.frequency_opt = Some(RollingFrequency::EveryHour);
         self
     }
 
     /// Sets a condition to rollover when a certain size is reached
-    pub fn max_size(mut self, x: u64) -> RollingConditionBasic {
+    pub fn max_size(mut self, x: u64) -> Self {
         self.max_size_opt = Some(x);
+        self
+    }
+
+    /// Sets a condition to rollover when a certain number of files is reached
+    pub fn max_files(mut self, max_files: usize) -> Self {
+        self.max_files_opt = Some(max_files);
         self
     }
 }
@@ -160,6 +174,10 @@ impl RollingCondition for RollingConditionBasic {
         self.last_write_opt = Some(*now);
         rollover
     }
+
+    fn max_files(&self) -> usize {
+        self.max_files_opt.unwrap_or(1)
+    }
 }
 
 /// Writes data to a file, and "rolls over" to preserve older data in
@@ -173,7 +191,6 @@ where
 {
     condition: RC,
     base_filename: OsString,
-    max_files: usize,
     buffer_capacity: Option<usize>,
     current_filesize: u64,
     writer_opt: Option<BufWriter<File>>,
@@ -185,11 +202,11 @@ where
 {
     /// Creates a new rolling file appender with the given condition.
     /// The parent directory of the base path must already exist.
-    pub fn new<P>(path: P, condition: RC, max_files: usize) -> io::Result<RollingFileAppender<RC>>
+    pub fn new<P>(path: P, condition: RC) -> io::Result<RollingFileAppender<RC>>
     where
         P: AsRef<Path>,
     {
-        Self::_new(path, condition, max_files, None)
+        Self::_new(path, condition, None)
     }
 
     /// Creates a new rolling file appender with the given condition and write buffer capacity.
@@ -197,28 +214,21 @@ where
     pub fn new_with_buffer_capacity<P>(
         path: P,
         condition: RC,
-        max_files: usize,
         buffer_capacity: usize,
     ) -> io::Result<RollingFileAppender<RC>>
     where
         P: AsRef<Path>,
     {
-        Self::_new(path, condition, max_files, Some(buffer_capacity))
+        Self::_new(path, condition, Some(buffer_capacity))
     }
 
-    fn _new<P>(
-        path: P,
-        condition: RC,
-        max_files: usize,
-        buffer_capacity: Option<usize>,
-    ) -> io::Result<RollingFileAppender<RC>>
+    fn _new<P>(path: P, condition: RC, buffer_capacity: Option<usize>) -> io::Result<RollingFileAppender<RC>>
     where
         P: AsRef<Path>,
     {
         let mut rfa = RollingFileAppender {
             condition,
             base_filename: path.as_ref().as_os_str().to_os_string(),
-            max_files,
             buffer_capacity,
             current_filesize: 0,
             writer_opt: None,
@@ -241,9 +251,9 @@ where
     /// This may result in the deletion of the oldest file
     fn rotate_files(&mut self) -> io::Result<()> {
         // ignore any failure removing the oldest file (may not exist)
-        let _ = fs::remove_file(self.filename_for(self.max_files.max(1)));
+        let _ = fs::remove_file(self.filename_for(self.condition.max_files().max(1)));
         let mut r = Ok(());
-        for i in (0..self.max_files.max(1)).rev() {
+        for i in (0..self.condition.max_files().max(1)).rev() {
             let rotate_from = self.filename_for(i);
             let rotate_to = self.filename_for(i + 1);
             if let Err(e) = fs::rename(rotate_from, rotate_to).or_else(|e| match e.kind() {
@@ -394,18 +404,13 @@ mod t {
         }
     }
 
-    fn build_context<RC: RollingCondition>(
-        condition: RC,
-        max_files: usize,
-        buffer_capacity: Option<usize>,
-    ) -> Context<RC> {
+    fn build_context<RC: RollingCondition>(condition: RC, buffer_capacity: Option<usize>) -> Context<RC> {
         let tempdir = tempfile::tempdir().unwrap();
         let rolling = match buffer_capacity {
-            None => RollingFileAppender::<RC>::new(tempdir.path().join("test.log"), condition, max_files).unwrap(),
+            None => RollingFileAppender::<RC>::new(tempdir.path().join("test.log"), condition).unwrap(),
             Some(capacity) => RollingFileAppender::<RC>::new_with_buffer_capacity(
                 tempdir.path().join("test.log"),
                 condition,
-                max_files,
                 capacity,
             )
             .unwrap(),
@@ -418,7 +423,7 @@ mod t {
 
     #[test]
     fn frequency_every_day() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().daily().max_files(9), None);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -445,7 +450,7 @@ mod t {
 
     #[test]
     fn frequency_every_day_limited_files() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 2, None);
+        let mut c = build_context(RollingConditionBasic::new().daily().max_files(2), None);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -471,7 +476,7 @@ mod t {
 
     #[test]
     fn frequency_every_hour() {
-        let mut c = build_context(RollingConditionBasic::new().hourly(), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().hourly().max_files(9), None);
         c.rolling
             .write_with_datetime(b"Line 1\n", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -495,8 +500,9 @@ mod t {
     #[test]
     fn frequency_every_minute() {
         let mut c = build_context(
-            RollingConditionBasic::new().frequency(RollingFrequency::EveryMinute),
-            9,
+            RollingConditionBasic::new()
+                .frequency(RollingFrequency::EveryMinute)
+                .max_files(9),
             None,
         );
         c.rolling
@@ -529,7 +535,7 @@ mod t {
 
     #[test]
     fn max_size() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10).max_files(9), None);
         c.rolling
             .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -557,7 +563,7 @@ mod t {
 
     #[test]
     fn max_size_existing() {
-        let mut c = build_context(RollingConditionBasic::new().max_size(10), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().max_size(10).max_files(9), None);
         c.rolling
             .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -589,7 +595,7 @@ mod t {
 
     #[test]
     fn daily_and_max_size() {
-        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10), 9, None);
+        let mut c = build_context(RollingConditionBasic::new().daily().max_size(10).max_files(9), None);
         c.rolling
             .write_with_datetime(b"12345", &Local.with_ymd_and_hms(2021, 3, 30, 1, 2, 3).unwrap())
             .unwrap();
@@ -617,7 +623,7 @@ mod t {
 
     #[test]
     fn default_buffer_capacity() {
-        let c = build_context(RollingConditionBasic::new().daily(), 9, None);
+        let c = build_context(RollingConditionBasic::new().daily().max_files(9), None);
         // currently capacity should be 8192; but it may change (ref: https://doc.rust-lang.org/std/io/struct.BufWriter.html#method.new)
         // so we can't hard code and there's no way to get default capacity other than creating a dummy one...
         let default_capacity = BufWriter::new(tempfile::tempfile().unwrap()).capacity();
@@ -632,7 +638,7 @@ mod t {
 
     #[test]
     fn large_buffer_capacity_and_flush() {
-        let mut c = build_context(RollingConditionBasic::new().daily(), 9, Some(100_000));
+        let mut c = build_context(RollingConditionBasic::new().daily().max_files(9), Some(100_000));
         assert_eq!(c.rolling.writer_opt.as_ref().map(|b| b.capacity()), Some(100_000));
         c.verify_not_contains("12345", 0);
 
@@ -660,7 +666,7 @@ mod t {
 
     #[test]
     fn file_appender() {
-        let mut c = build_context(NoRollingCondition::default(), 1, Some(100));
+        let mut c = build_context(NoRollingCondition::default(), Some(100));
         assert_eq!(c.rolling.writer_opt.as_ref().map(|b| b.capacity()), Some(100));
 
         c.rolling.write_all(b"hello").unwrap();
